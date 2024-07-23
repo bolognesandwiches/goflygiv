@@ -5,6 +5,7 @@ app = "gitemviewer"
 
 [env]
   PORT = "8080"
+  DATABASE_URL = "postgres://postgres:${DB_PASSWORD}@localhost:5432/postgres?sslmode=disable"
 
 [http_service]
   internal_port = 8080
@@ -12,3 +13,7 @@ app = "gitemviewer"
   auto_stop_machines = true
   auto_start_machines = true
   min_machines_running = 0
+
+[mounts]
+  source = "pg_data"
+  destination = "/data"
