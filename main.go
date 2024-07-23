@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 
 	"github.com/gin-gonic/gin"
@@ -27,26 +28,28 @@ func main() {
 		log.Fatal("DATABASE_URL environment variable is not set")
 	}
 
-	var err error
-	db, err = sql.Open("postgres", dbURL)
+	// Parse the URL and add sslmode=disable if it's not already there
+	parsedURL, err := url.Parse(dbURL)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Error parsing DATABASE_URL: %v", err)
+	}
+	query := parsedURL.Query()
+	query.Set("sslmode", "disable")
+	parsedURL.RawQuery = query.Encode()
+
+	var dbErr error
+	db, dbErr = sql.Open("postgres", parsedURL.String())
+	if dbErr != nil {
+		log.Fatalf("Error opening database: %v", dbErr)
 	}
 	defer db.Close()
 
-	// Create the table if it doesn't exist
-	_, err = db.Exec(`
-        CREATE TABLE IF NOT EXISTS scans (
-            id SERIAL PRIMARY KEY,
-            user_id TEXT,
-            scan_type TEXT,
-            timestamp TIMESTAMP,
-            data JSONB
-        )
-    `)
-	if err != nil {
-		log.Fatal(err)
+	// Test the database connection
+	if err := db.Ping(); err != nil {
+		log.Fatalf("Error connecting to the database: %v", err)
 	}
+
+	log.Println("Successfully connected to the database")
 
 	r := gin.Default()
 	r.POST("/scan", recordScan)
@@ -56,9 +59,11 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	r.Run(":" + port)
+	log.Printf("Starting server on port %s", port)
+	if err := r.Run(":" + port); err != nil {
+		log.Fatalf("Error starting server: %v", err)
+	}
 }
-
 func recordScan(c *gin.Context) {
 	var scanData ScanData
 	if err := c.BindJSON(&scanData); err != nil {
