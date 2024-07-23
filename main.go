@@ -52,7 +52,7 @@ func main() {
 	log.Println("Successfully connected to the database")
 
 	r := gin.Default()
-	r.POST("/scan", recordScan)
+	r.POST("/scan", authenticateAPIKey(recordScan))
 	r.GET("/scans/:user_id", getUserScans)
 
 	port := os.Getenv("PORT")
@@ -64,6 +64,28 @@ func main() {
 		log.Fatalf("Error starting server: %v", err)
 	}
 }
+
+func authenticateAPIKey(f gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		apiKey := c.GetHeader("Authorization")
+		if apiKey == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "API key required"})
+			c.Abort()
+			return
+		}
+
+		// Check the API key against the environment variable
+		expectedAPIKey := os.Getenv("API_KEY")
+		if apiKey != "Bearer "+expectedAPIKey {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
+			c.Abort()
+			return
+		}
+
+		f(c)
+	}
+}
+
 func recordScan(c *gin.Context) {
 	var scanData ScanData
 	if err := c.BindJSON(&scanData); err != nil {
