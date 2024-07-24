@@ -109,7 +109,8 @@ func recordScan(c *gin.Context) {
 func getUserScans(c *gin.Context) {
 	userID := c.Param("user_id")
 
-	rows, err := db.Query("SELECT scan_type, timestamp, data FROM scans WHERE user_id = $1", userID)
+	// Use ILIKE for case-insensitive matching
+	rows, err := db.Query("SELECT scan_type, timestamp, data FROM scans WHERE LOWER(user_id) = LOWER($1)", userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -124,7 +125,7 @@ func getUserScans(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		scan.UserID = userID
+		scan.UserID = userID // Use the original userID to maintain the case
 		scan.Timestamp = timestamp
 		scans = append(scans, scan)
 	}
