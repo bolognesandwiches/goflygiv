@@ -72,8 +72,8 @@ func main() {
 	r.POST("/scan", authenticateAPIKey(recordScan))
 	r.GET("/scans/:user_id", getUserScans)
 	r.POST("/trade", authenticateAPIKey(recordTrade))
-	r.GET("/trade", authenticateAPIKey(getAllTradeUIDs))
-	r.GET("/trade/:uid", authenticateAPIKey(getTradeByUID))
+	r.GET("/trade", getAllTradeUIDs)
+	r.GET("/trade/:uid", getTradeByUID)
 
 	port := os.Getenv("PORT")
 	if port == "" {
