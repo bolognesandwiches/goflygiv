@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+	"gopkg.in/gomail.v2"
 )
 
 type ScanData struct {
@@ -74,6 +76,7 @@ func main() {
 	r.POST("/trade", authenticateAPIKey(recordTrade))
 	r.GET("/trade", authenticateGetAPIKey(getAllTradeUIDs))
 	r.GET("/trade/:uid", authenticateGetAPIKey(getTradeByUID))
+	r.POST("/deletion-request", authenticateAPIKey(handleDeletionRequest))
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -289,4 +292,40 @@ func getTradeByUID(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, tradeItems)
+}
+
+func handleDeletionRequest(c *gin.Context) {
+	var request struct {
+		Username string `json:"username"`
+		Reason   string `json:"reason"`
+	}
+
+	if err := c.BindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Log the request
+	log.Printf("Deletion request received for user: %s", request.Username)
+
+	// Send email notification
+	if err := sendDeletionRequestEmail(request.Username, request.Reason); err != nil {
+		log.Printf("Failed to send deletion request email: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process deletion request"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "Deletion request received and logged"})
+}
+
+func sendDeletionRequestEmail(username, reason string) error {
+	m := gomail.NewMessage()
+	m.SetHeader("From", os.Getenv("EMAIL_FROM"))
+	m.SetHeader("To", os.Getenv("EMAIL_TO"))
+	m.SetHeader("Subject", "Data Deletion Request")
+	m.SetBody("text/plain", fmt.Sprintf("Username: %s\n\nReason: %s", username, reason))
+
+	d := gomail.NewDialer("smtp.gmail.com", 587, os.Getenv("EMAIL_FROM"), os.Getenv("EMAIL_PASSWORD"))
+
+	return d.DialAndSend(m)
 }
