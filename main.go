@@ -72,8 +72,8 @@ func main() {
 	r.POST("/scan", authenticateAPIKey(recordScan))
 	r.GET("/scans/:user_id", getUserScans)
 	r.POST("/trade", authenticateAPIKey(recordTrade))
-	r.GET("/trade", getAllTradeUIDs)
-	r.GET("/trade/:uid", getTradeByUID)
+	r.GET("/trade", authenticateGetAPIKey(getAllTradeUIDs))
+	r.GET("/trade/:uid", authenticateGetAPIKey(getTradeByUID))
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -111,6 +111,26 @@ func authenticateAPIKey(f gin.HandlerFunc) gin.HandlerFunc {
 
 		// Check the API key against the environment variable
 		expectedAPIKey := os.Getenv("API_KEY")
+		if apiKey != "Bearer "+expectedAPIKey {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
+			c.Abort()
+			return
+		}
+
+		f(c)
+	}
+}
+
+func authenticateGetAPIKey(f gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		apiKey := c.GetHeader("Authorization")
+		if apiKey == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "API key required"})
+			c.Abort()
+			return
+		}
+
+		expectedAPIKey := os.Getenv("GET_API_KEY")
 		if apiKey != "Bearer "+expectedAPIKey {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
 			c.Abort()
