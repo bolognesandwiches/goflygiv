@@ -21,18 +21,14 @@ type ScanData struct {
 	Data      json.RawMessage `json:"data"` // Store the full scan data as JSON
 }
 
-type TradeData struct {
-	UID       string      `json:"uid"`
-	Date      time.Time   `json:"date"`
-	Trader    string      `json:"trader"`
-	Recipient string      `json:"recipient"`
-	Items     []TradeItem `json:"items"`
-}
-
 type TradeItem struct {
-	Name    string  `json:"name"`
-	ItemID  int     `json:"item_id"`
-	HCValue float64 `json:"hc_value"`
+	UID       string    `json:"uid"`
+	Date      time.Time `json:"date"`
+	Trader    string    `json:"trader"`
+	Recipient string    `json:"recipient"`
+	ItemName  string    `json:"item_name"`
+	ItemID    int       `json:"item_id"`
+	HCValue   float64   `json:"hc_value"`
 }
 
 var db *sql.DB
@@ -90,14 +86,15 @@ func main() {
 }
 
 func initDB() error {
-	// Create trades table if it doesn't exist
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS trades (
-			uid UUID PRIMARY KEY,
+			uid UUID,
 			date TIMESTAMP,
 			trader TEXT,
 			recipient TEXT,
-			items JSONB
+			item_name TEXT,
+			item_id INTEGER,
+			hc_value FLOAT
 		)
 	`)
 	return err
@@ -172,30 +169,32 @@ func getUserScans(c *gin.Context) {
 }
 
 func recordTrade(c *gin.Context) {
-	var tradeData TradeData
-	if err := c.BindJSON(&tradeData); err != nil {
+	var tradeItems []TradeItem
+	if err := c.BindJSON(&tradeItems); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	tradeData.UID = uuid.New().String()
-	itemsJSON, err := json.Marshal(tradeData.Items)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal items data"})
+	if len(tradeItems) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No trade items provided"})
 		return
 	}
 
-	_, err = db.Exec(`
-		INSERT INTO trades (uid, date, trader, recipient, items)
-		VALUES ($1, $2, $3, $4, $5)
-	`, tradeData.UID, tradeData.Date, tradeData.Trader, tradeData.Recipient, itemsJSON)
+	tradeUID := uuid.New().String()
 
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+	for _, item := range tradeItems {
+		_, err := db.Exec(`
+			INSERT INTO trades (uid, date, trader, recipient, item_name, item_id, hc_value)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`, tradeUID, item.Date, item.Trader, item.Recipient, item.ItemName, item.ItemID, item.HCValue)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "recorded", "uid": tradeData.UID})
+	c.JSON(http.StatusOK, gin.H{"status": "recorded", "uid": tradeUID})
 }
 
 func getAllTradeUIDs(c *gin.Context) {
@@ -203,7 +202,7 @@ func getAllTradeUIDs(c *gin.Context) {
 	startDate := c.Query("start_date")
 	endDate := c.Query("end_date")
 
-	query := "SELECT uid, date FROM trades"
+	query := "SELECT DISTINCT uid, date FROM trades"
 	var args []interface{}
 	if startDate != "" && endDate != "" {
 		query += " WHERE date BETWEEN $1 AND $2"
@@ -246,24 +245,28 @@ func getAllTradeUIDs(c *gin.Context) {
 func getTradeByUID(c *gin.Context) {
 	uid := c.Param("uid")
 
-	var trade TradeData
-	var itemsJSON []byte
-
-	err := db.QueryRow("SELECT uid, date, trader, recipient, items FROM trades WHERE uid = $1", uid).
-		Scan(&trade.UID, &trade.Date, &trade.Trader, &trade.Recipient, &itemsJSON)
-
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Trade not found"})
-		return
-	} else if err != nil {
+	rows, err := db.Query("SELECT date, trader, recipient, item_name, item_id, hc_value FROM trades WHERE uid = $1", uid)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	defer rows.Close()
 
-	if err := json.Unmarshal(itemsJSON, &trade.Items); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to unmarshal items data"})
+	var tradeItems []TradeItem
+	for rows.Next() {
+		var item TradeItem
+		item.UID = uid
+		if err := rows.Scan(&item.Date, &item.Trader, &item.Recipient, &item.ItemName, &item.ItemID, &item.HCValue); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		tradeItems = append(tradeItems, item)
+	}
+
+	if len(tradeItems) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Trade not found"})
 		return
 	}
 
-	c.JSON(http.StatusOK, trade)
+	c.JSON(http.StatusOK, tradeItems)
 }
