@@ -89,18 +89,50 @@ func main() {
 }
 
 func initDB() error {
+	// Create scans table if it doesn't exist
 	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS trades (
-			uid UUID,
-			date TIMESTAMP,
-			trader TEXT,
-			recipient TEXT,
-			item_name TEXT,
-			item_id INTEGER,
-			hc_value FLOAT
-		)
-	`)
-	return err
+        CREATE TABLE IF NOT EXISTS scans (
+            id SERIAL PRIMARY KEY,
+            user_id TEXT,
+            scan_type TEXT,
+            timestamp TIMESTAMP,
+            data JSONB
+        )
+    `)
+	if err != nil {
+		return err
+	}
+
+	// Create trades table if it doesn't exist
+	_, err = db.Exec(`
+        CREATE TABLE IF NOT EXISTS trades (
+            uid UUID,
+            date TIMESTAMP,
+            trader TEXT,
+            recipient TEXT,
+            item_name TEXT,
+            item_id INTEGER,
+            hc_value FLOAT
+        )
+    `)
+	if err != nil {
+		return err
+	}
+
+	// Create deletion_requests table if it doesn't exist
+	_, err = db.Exec(`
+        CREATE TABLE IF NOT EXISTS deletion_requests (
+            id SERIAL PRIMARY KEY,
+            username TEXT NOT NULL,
+            reason TEXT,
+            request_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func authenticateAPIKey(f gin.HandlerFunc) gin.HandlerFunc {
@@ -305,14 +337,22 @@ func handleDeletionRequest(c *gin.Context) {
 		return
 	}
 
+	// Insert into database
+	_, err := db.Exec("INSERT INTO deletion_requests (username, reason) VALUES ($1, $2)",
+		request.Username, request.Reason)
+	if err != nil {
+		log.Printf("Error inserting deletion request: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process deletion request"})
+		return
+	}
+
 	// Log the request
 	log.Printf("Deletion request received for user: %s", request.Username)
 
 	// Send email notification
 	if err := sendDeletionRequestEmail(request.Username, request.Reason); err != nil {
 		log.Printf("Failed to send deletion request email: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process deletion request"})
-		return
+		// Note: We're still returning OK to the client even if email fails
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "Deletion request received and logged"})
