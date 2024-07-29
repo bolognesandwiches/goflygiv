@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -42,15 +41,15 @@ type TradeItem struct {
 
 var db *sql.DB
 
-func init() {
-	privateKey := os.Getenv("SSH_PRIVATE_KEY")
-	err := ioutil.WriteFile("/app/private_key", []byte(privateKey), 0600)
-	if err != nil {
-		log.Fatalf("Failed to write private key: %v", err)
-	}
-	os.Setenv("SSH_PRIVATE_KEY_PATH", "/app/private_key")
-}
+var privateKey []byte
 
+func init() {
+	privateKeyString := os.Getenv("SSH_PRIVATE_KEY")
+	privateKey = []byte(privateKeyString)
+	if len(privateKey) == 0 {
+		log.Fatal("SSH_PRIVATE_KEY environment variable is not set or is empty")
+	}
+}
 func main() {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -466,12 +465,6 @@ func uploadFileViaSFTP(filename string) error {
 	sftpHost := os.Getenv("SFTP_HOST")
 	sftpPort := os.Getenv("SFTP_PORT")
 	sftpUser := os.Getenv("SFTP_USER")
-	privateKeyPath := os.Getenv("SSH_PRIVATE_KEY_PATH")
-
-	privateKey, err := ioutil.ReadFile(privateKeyPath)
-	if err != nil {
-		return fmt.Errorf("failed to read private key: %v", err)
-	}
 
 	signer, err := ssh.ParsePrivateKey(privateKey)
 	if err != nil {
