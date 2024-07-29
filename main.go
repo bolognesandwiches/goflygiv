@@ -97,6 +97,7 @@ func main() {
 	r.GET("/trade/:uid", authenticateGetAPIKey(getTradeByUID))
 	r.POST("/deletion-request", authenticateAPIKey(handleDeletionRequest))
 	r.POST("/export", authenticateAPIKey(handleExport))
+	r.POST("/manual-export", authenticateAPIKey(handleManualExport))
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -210,6 +211,14 @@ func recordScan(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "recorded"})
+}
+
+func handleManualExport(c *gin.Context) {
+	if err := executeExport(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Export failed: %v", err)})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Export completed successfully"})
 }
 
 func getUserScans(c *gin.Context) {
@@ -448,21 +457,9 @@ func generateExportFile() (string, error) {
 }
 
 func performDailyExport() {
-	log.Println("Starting daily trade export")
-
-	filename, err := generateExportFile()
-	if err != nil {
-		log.Printf("Failed to generate export file: %v", err)
-		return
+	if err := executeExport(); err != nil {
+		log.Printf("Daily export failed: %v", err)
 	}
-
-	err = uploadFileViaSFTP(filename)
-	if err != nil {
-		log.Printf("Failed to upload file via SFTP: %v", err)
-		return
-	}
-
-	log.Println("Daily trade export completed successfully")
 }
 
 func uploadFileViaSFTP(filename string) error {
@@ -520,5 +517,22 @@ func uploadFileViaSFTP(filename string) error {
 		return fmt.Errorf("failed to copy file contents: %v", err)
 	}
 
+	return nil
+}
+
+func executeExport() error {
+	log.Println("Starting trade export")
+
+	filename, err := generateExportFile()
+	if err != nil {
+		return fmt.Errorf("failed to generate export file: %v", err)
+	}
+
+	err = uploadFileViaSFTP(filename)
+	if err != nil {
+		return fmt.Errorf("failed to upload file via SFTP: %v", err)
+	}
+
+	log.Println("Trade export completed successfully")
 	return nil
 }
