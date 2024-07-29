@@ -4,23 +4,30 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+	"github.com/pkg/sftp"
+	"github.com/robfig/cron/v3"
+	"golang.org/x/crypto/ssh"
 	"gopkg.in/gomail.v2"
 )
 
 type ScanData struct {
 	UserID    string          `json:"user_id"`
-	ScanType  string          `json:"scan_type"` // "inventory" or "room"
+	ScanType  string          `json:"scan_type"`
 	Timestamp string          `json:"timestamp"`
-	Data      json.RawMessage `json:"data"` // Store the full scan data as JSON
+	Data      json.RawMessage `json:"data"`
 }
 
 type TradeItem struct {
@@ -35,14 +42,28 @@ type TradeItem struct {
 
 var db *sql.DB
 
+func init() {
+	privateKey := os.Getenv("SSH_PRIVATE_KEY")
+	err := ioutil.WriteFile("/app/private_key", []byte(privateKey), 0600)
+	if err != nil {
+		log.Fatalf("Failed to write private key: %v", err)
+	}
+	os.Setenv("SSH_PRIVATE_KEY_PATH", "/app/private_key")
+}
+
 func main() {
-	// Get the DATABASE_URL from environment variables
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		log.Fatal("DATABASE_URL environment variable is not set")
 	}
 
-	// Parse the URL and add sslmode=disable if it's not already there
+	c := cron.New()
+	_, err := c.AddFunc("0 1 * * *", performDailyExport)
+	if err != nil {
+		log.Fatalf("Error setting up cron job: %v", err)
+	}
+	c.Start()
+
 	parsedURL, err := url.Parse(dbURL)
 	if err != nil {
 		log.Fatalf("Error parsing DATABASE_URL: %v", err)
@@ -58,14 +79,12 @@ func main() {
 	}
 	defer db.Close()
 
-	// Test the database connection
 	if err := db.Ping(); err != nil {
 		log.Fatalf("Error connecting to the database: %v", err)
 	}
 
 	log.Println("Successfully connected to the database")
 
-	// Initialize the database
 	if err := initDB(); err != nil {
 		log.Fatalf("Error initializing database: %v", err)
 	}
@@ -77,6 +96,7 @@ func main() {
 	r.GET("/trade", authenticateGetAPIKey(getAllTradeUIDs))
 	r.GET("/trade/:uid", authenticateGetAPIKey(getTradeByUID))
 	r.POST("/deletion-request", authenticateAPIKey(handleDeletionRequest))
+	r.POST("/export", authenticateAPIKey(handleExport))
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -88,8 +108,27 @@ func main() {
 	}
 }
 
+func authenticateGetAPIKey(f gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		apiKey := c.GetHeader("Authorization")
+		if apiKey == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "API key required"})
+			c.Abort()
+			return
+		}
+
+		expectedAPIKey := os.Getenv("GET_API_KEY")
+		if apiKey != "Bearer "+expectedAPIKey {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
+			c.Abort()
+			return
+		}
+
+		f(c)
+	}
+}
+
 func initDB() error {
-	// Create scans table if it doesn't exist
 	_, err := db.Exec(`
         CREATE TABLE IF NOT EXISTS scans (
             id SERIAL PRIMARY KEY,
@@ -103,7 +142,6 @@ func initDB() error {
 		return err
 	}
 
-	// Create trades table if it doesn't exist
 	_, err = db.Exec(`
         CREATE TABLE IF NOT EXISTS trades (
             uid UUID,
@@ -119,7 +157,6 @@ func initDB() error {
 		return err
 	}
 
-	// Create deletion_requests table if it doesn't exist
 	_, err = db.Exec(`
         CREATE TABLE IF NOT EXISTS deletion_requests (
             id SERIAL PRIMARY KEY,
@@ -144,28 +181,7 @@ func authenticateAPIKey(f gin.HandlerFunc) gin.HandlerFunc {
 			return
 		}
 
-		// Check the API key against the environment variable
 		expectedAPIKey := os.Getenv("API_KEY")
-		if apiKey != "Bearer "+expectedAPIKey {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
-			c.Abort()
-			return
-		}
-
-		f(c)
-	}
-}
-
-func authenticateGetAPIKey(f gin.HandlerFunc) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		apiKey := c.GetHeader("Authorization")
-		if apiKey == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "API key required"})
-			c.Abort()
-			return
-		}
-
-		expectedAPIKey := os.Getenv("GET_API_KEY")
 		if apiKey != "Bearer "+expectedAPIKey {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
 			c.Abort()
@@ -199,7 +215,6 @@ func recordScan(c *gin.Context) {
 func getUserScans(c *gin.Context) {
 	userID := c.Param("user_id")
 
-	// Use ILIKE for case-insensitive matching
 	rows, err := db.Query("SELECT scan_type, timestamp, data FROM scans WHERE LOWER(user_id) = LOWER($1)", userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -215,7 +230,7 @@ func getUserScans(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		scan.UserID = userID // Use the original userID to maintain the case
+		scan.UserID = userID
 		scan.Timestamp = timestamp
 		scans = append(scans, scan)
 	}
@@ -239,9 +254,9 @@ func recordTrade(c *gin.Context) {
 
 	for _, item := range tradeItems {
 		_, err := db.Exec(`
-			INSERT INTO trades (uid, date, trader, recipient, item_name, item_id, hc_value)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-		`, tradeUID, item.Date, item.Trader, item.Recipient, item.ItemName, item.ItemID, item.HCValue)
+            INSERT INTO trades (uid, date, trader, recipient, item_name, item_id, hc_value)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, tradeUID, item.Date, item.Trader, item.Recipient, item.ItemName, item.ItemID, item.HCValue)
 
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -253,7 +268,6 @@ func recordTrade(c *gin.Context) {
 }
 
 func getAllTradeUIDs(c *gin.Context) {
-	// Parse query parameters for date filtering
 	startDate := c.Query("start_date")
 	endDate := c.Query("end_date")
 
@@ -337,7 +351,6 @@ func handleDeletionRequest(c *gin.Context) {
 		return
 	}
 
-	// Insert into database
 	_, err := db.Exec("INSERT INTO deletion_requests (username, reason) VALUES ($1, $2)",
 		request.Username, request.Reason)
 	if err != nil {
@@ -346,13 +359,10 @@ func handleDeletionRequest(c *gin.Context) {
 		return
 	}
 
-	// Log the request
 	log.Printf("Deletion request received for user: %s", request.Username)
 
-	// Send email notification
 	if err := sendDeletionRequestEmail(request.Username, request.Reason); err != nil {
 		log.Printf("Failed to send deletion request email: %v", err)
-		// Note: We're still returning OK to the client even if email fails
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "Deletion request received and logged"})
@@ -365,7 +375,150 @@ func sendDeletionRequestEmail(username, reason string) error {
 	m.SetHeader("Subject", "Data Deletion Request")
 	m.SetBody("text/plain", fmt.Sprintf("Username: %s\n\nReason: %s", username, reason))
 
-	d := gomail.NewDialer("smtp.gmail.com", 587, os.Getenv("EMAIL_FROM"), os.Getenv("EMAIL_PASSWORD"))
+	port, _ := strconv.Atoi(os.Getenv("SMTP_PORT"))
+	d := gomail.NewDialer(os.Getenv("SMTP_HOST"), port, os.Getenv("EMAIL_FROM"), os.Getenv("EMAIL_PASSWORD"))
 
 	return d.DialAndSend(m)
+}
+
+func handleExport(c *gin.Context) {
+	filename, err := generateExportFile()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate export file"})
+		return
+	}
+
+	err = uploadFileViaSFTP(filename)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upload file via SFTP"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Export completed successfully"})
+}
+func generateExportFile() (string, error) {
+	// Get today's date in the format YYYY-MM-DD
+	today := time.Now().Format("2006-01-02")
+	filename := fmt.Sprintf("trades_export_%s.csv", today)
+
+	// Open the file for writing
+	file, err := os.Create(filename)
+	if err != nil {
+		return "", fmt.Errorf("failed to create file: %v", err)
+	}
+	defer file.Close()
+
+	// Write CSV header
+	_, err = file.WriteString("uid,date,trader,recipient,item_name,item_id,hc_value\n")
+	if err != nil {
+		return "", fmt.Errorf("failed to write CSV header: %v", err)
+	}
+
+	// Query the database for today's trades
+	rows, err := db.Query(`
+        SELECT uid, date, trader, recipient, item_name, item_id, hc_value 
+        FROM trades 
+        WHERE DATE(date) = CURRENT_DATE
+    `)
+	if err != nil {
+		return "", fmt.Errorf("failed to query trades: %v", err)
+	}
+	defer rows.Close()
+
+	// Write trade data to CSV
+	for rows.Next() {
+		var uid, trader, recipient, itemName string
+		var date time.Time
+		var itemID int
+		var hcValue float64
+
+		err := rows.Scan(&uid, &date, &trader, &recipient, &itemName, &itemID, &hcValue)
+		if err != nil {
+			return "", fmt.Errorf("failed to scan row: %v", err)
+		}
+
+		_, err = file.WriteString(fmt.Sprintf("%s,%s,%s,%s,%s,%d,%.2f\n",
+			uid, date.Format("2006-01-02 15:04:05"), trader, recipient, itemName, itemID, hcValue))
+		if err != nil {
+			return "", fmt.Errorf("failed to write row: %v", err)
+		}
+	}
+
+	return filename, nil
+}
+
+func performDailyExport() {
+	log.Println("Starting daily trade export")
+
+	filename, err := generateExportFile()
+	if err != nil {
+		log.Printf("Failed to generate export file: %v", err)
+		return
+	}
+
+	err = uploadFileViaSFTP(filename)
+	if err != nil {
+		log.Printf("Failed to upload file via SFTP: %v", err)
+		return
+	}
+
+	log.Println("Daily trade export completed successfully")
+}
+
+func uploadFileViaSFTP(filename string) error {
+	sftpHost := os.Getenv("SFTP_HOST")
+	sftpPort := os.Getenv("SFTP_PORT")
+	sftpUser := os.Getenv("SFTP_USER")
+	privateKeyPath := os.Getenv("SSH_PRIVATE_KEY_PATH")
+
+	privateKey, err := ioutil.ReadFile(privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to read private key: %v", err)
+	}
+
+	signer, err := ssh.ParsePrivateKey(privateKey)
+	if err != nil {
+		return fmt.Errorf("failed to parse private key: %v", err)
+	}
+
+	config := &ssh.ClientConfig{
+		User: sftpUser,
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(signer),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	}
+
+	conn, err := ssh.Dial("tcp", fmt.Sprintf("%s:%s", sftpHost, sftpPort), config)
+	if err != nil {
+		return fmt.Errorf("failed to dial: %v", err)
+	}
+	defer conn.Close()
+
+	client, err := sftp.NewClient(conn)
+	if err != nil {
+		return fmt.Errorf("failed to create SFTP client: %v", err)
+	}
+	defer client.Close()
+
+	localFile, err := os.Open(filename)
+	if err != nil {
+		return fmt.Errorf("failed to open local file: %v", err)
+	}
+	defer localFile.Close()
+
+	remoteFilename := filepath.Base(filename)
+
+	remoteFile, err := client.Create("/upload/" + remoteFilename)
+	if err != nil {
+		return fmt.Errorf("failed to create remote file: %v", err)
+	}
+	defer remoteFile.Close()
+
+	_, err = io.Copy(remoteFile, localFile)
+	if err != nil {
+		return fmt.Errorf("failed to copy file contents: %v", err)
+	}
+
+	return nil
 }
