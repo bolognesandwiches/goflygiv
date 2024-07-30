@@ -39,6 +39,11 @@ type TradeItem struct {
 	HCValue   float64   `json:"hc_value"`
 }
 
+type Item struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
 var db *sql.DB
 
 var privateKey []byte
@@ -50,6 +55,7 @@ func init() {
 		log.Fatal("SSH_PRIVATE_KEY environment variable is not set or is empty")
 	}
 }
+
 func main() {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -57,7 +63,7 @@ func main() {
 	}
 
 	c := cron.New()
-	_, err := c.AddFunc("0 1 * * *", performDailyExport)
+	_, err := c.AddFunc("0 * * * *", performHourlyExport)
 	if err != nil {
 		log.Fatalf("Error setting up cron job: %v", err)
 	}
@@ -97,6 +103,7 @@ func main() {
 	r.POST("/deletion-request", authenticateAPIKey(handleDeletionRequest))
 	r.POST("/export", authenticateAPIKey(handleExport))
 	r.POST("/manual-export", authenticateAPIKey(handleManualExport))
+	r.GET("/items", getItems) // New open endpoint for items
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -169,6 +176,17 @@ func initDB() error {
 		return err
 	}
 
+	_, err = db.Exec(`
+        CREATE TABLE IF NOT EXISTS items (
+            id SERIAL PRIMARY KEY,
+            item_id INTEGER UNIQUE,
+            item_name TEXT
+        )
+    `)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -207,6 +225,11 @@ func recordScan(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Add unique items to the items table
+	if err := addUniqueItems(); err != nil {
+		log.Printf("Failed to add unique items: %v", err)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "recorded"})
@@ -270,6 +293,11 @@ func recordTrade(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+	}
+
+	// Add unique items to the items table
+	if err := addUniqueItems(); err != nil {
+		log.Printf("Failed to add unique items: %v", err)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "recorded", "uid": tradeUID})
@@ -404,36 +432,32 @@ func handleExport(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "Export completed successfully"})
 }
-func generateExportFile() (string, error) {
-	// Get today's date in the format YYYY-MM-DD
-	today := time.Now().Format("2006-01-02")
-	filename := fmt.Sprintf("trades_export_%s.csv", today)
 
-	// Open the file for writing
+func generateExportFile() (string, error) {
+	now := time.Now()
+	filename := fmt.Sprintf("trades_export_%s.csv", now.Format("2006-01-02_15"))
+
 	file, err := os.Create(filename)
 	if err != nil {
 		return "", fmt.Errorf("failed to create file: %v", err)
 	}
 	defer file.Close()
 
-	// Write CSV header
 	_, err = file.WriteString("uid,date,trader,recipient,item_name,item_id,hc_value\n")
 	if err != nil {
 		return "", fmt.Errorf("failed to write CSV header: %v", err)
 	}
 
-	// Query the database for today's trades
 	rows, err := db.Query(`
-        SELECT uid, date, trader, recipient, item_name, item_id, hc_value 
-        FROM trades 
-        WHERE DATE(date) = CURRENT_DATE
-    `)
+		SELECT uid, date, trader, recipient, item_name, item_id, hc_value 
+		FROM trades 
+		WHERE date >= NOW() - INTERVAL '1 hour' AND date < NOW()
+	`)
 	if err != nil {
 		return "", fmt.Errorf("failed to query trades: %v", err)
 	}
 	defer rows.Close()
 
-	// Write trade data to CSV
 	for rows.Next() {
 		var uid, trader, recipient, itemName string
 		var date time.Time
@@ -455,9 +479,13 @@ func generateExportFile() (string, error) {
 	return filename, nil
 }
 
-func performDailyExport() {
+func performHourlyExport() {
 	if err := executeExport(); err != nil {
-		log.Printf("Daily export failed: %v", err)
+		log.Printf("Hourly export failed: %v", err)
+	}
+
+	if err := addUniqueItems(); err != nil {
+		log.Printf("Failed to add unique items: %v", err)
 	}
 }
 
@@ -528,4 +556,81 @@ func executeExport() error {
 
 	log.Println("Trade export completed successfully")
 	return nil
+}
+
+func addUniqueItems() error {
+	// Handle trades
+	_, err := db.Exec(`
+		INSERT INTO items (item_id, item_name)
+		SELECT DISTINCT item_id, item_name
+		FROM trades
+		ON CONFLICT (item_id) DO UPDATE SET item_name = EXCLUDED.item_name
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to add items from trades: %v", err)
+	}
+
+	// Handle scans
+	rows, err := db.Query(`
+		SELECT data
+		FROM scans
+		WHERE scan_type IN ('room', 'inventory')
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to query scans: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var scanData json.RawMessage
+		if err := rows.Scan(&scanData); err != nil {
+			return fmt.Errorf("failed to scan row: %v", err)
+		}
+
+		var data struct {
+			Items []struct {
+				ID   int    `json:"id"`
+				Name string `json:"name"`
+			} `json:"items"`
+		}
+
+		if err := json.Unmarshal(scanData, &data); err != nil {
+			log.Printf("Failed to unmarshal scan data: %v", err)
+			continue
+		}
+
+		for _, item := range data.Items {
+			_, err := db.Exec(`
+				INSERT INTO items (item_id, item_name)
+				VALUES ($1, $2)
+				ON CONFLICT (item_id) DO UPDATE SET item_name = EXCLUDED.item_name
+			`, item.ID, item.Name)
+			if err != nil {
+				log.Printf("Failed to insert item: %v", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func getItems(c *gin.Context) {
+	rows, err := db.Query("SELECT item_id, item_name FROM items")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch items"})
+		return
+	}
+	defer rows.Close()
+
+	var items []Item
+	for rows.Next() {
+		var item Item
+		if err := rows.Scan(&item.ID, &item.Name); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan item"})
+			return
+		}
+		items = append(items, item)
+	}
+
+	c.JSON(http.StatusOK, items)
 }
