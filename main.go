@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -103,7 +104,7 @@ func main() {
 	r.POST("/deletion-request", authenticateAPIKey(handleDeletionRequest))
 	r.POST("/export", authenticateAPIKey(handleExport))
 	r.POST("/manual-export", authenticateAPIKey(handleManualExport))
-	r.GET("/items", getItems) // New open endpoint for items
+	r.GET("/items", getItems)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -227,7 +228,6 @@ func recordScan(c *gin.Context) {
 		return
 	}
 
-	// Add unique items to the items table
 	if err := addUniqueItems(); err != nil {
 		log.Printf("Failed to add unique items: %v", err)
 	}
@@ -295,7 +295,6 @@ func recordTrade(c *gin.Context) {
 		}
 	}
 
-	// Add unique items to the items table
 	if err := addUniqueItems(); err != nil {
 		log.Printf("Failed to add unique items: %v", err)
 	}
@@ -559,37 +558,44 @@ func executeExport() error {
 }
 
 func addUniqueItems() error {
+	uniqueItems := make(map[int]string)
+
 	// Handle trades
-	_, err := db.Exec(`
-		INSERT INTO items (item_id, item_name)
-		SELECT DISTINCT item_id, item_name
-		FROM trades
-		ON CONFLICT (item_id) DO UPDATE SET item_name = EXCLUDED.item_name
-	`)
+	tradeRows, err := db.Query("SELECT DISTINCT item_id, item_name FROM trades")
 	if err != nil {
-		return fmt.Errorf("failed to add items from trades: %v", err)
+		return fmt.Errorf("failed to query trades: %v", err)
+	}
+	defer tradeRows.Close()
+
+	for tradeRows.Next() {
+		var id int
+		var name string
+		if err := tradeRows.Scan(&id, &name); err != nil {
+			return fmt.Errorf("failed to scan trade row: %v", err)
+		}
+		uniqueItems[id] = name
 	}
 
 	// Handle scans
-	rows, err := db.Query(`
-		SELECT data
-		FROM scans
-		WHERE scan_type IN ('room', 'inventory')
-	`)
+	scanRows, err := db.Query(`
+        SELECT data
+        FROM scans
+        WHERE scan_type IN ('room', 'inventory')
+    `)
 	if err != nil {
 		return fmt.Errorf("failed to query scans: %v", err)
 	}
-	defer rows.Close()
+	defer scanRows.Close()
 
-	for rows.Next() {
+	for scanRows.Next() {
 		var scanData json.RawMessage
-		if err := rows.Scan(&scanData); err != nil {
+		if err := scanRows.Scan(&scanData); err != nil {
 			return fmt.Errorf("failed to scan row: %v", err)
 		}
 
 		var data struct {
 			Items []struct {
-				ID   int    `json:"id"`
+				ID   string `json:"id"`
 				Name string `json:"name"`
 			} `json:"items"`
 		}
@@ -600,14 +606,29 @@ func addUniqueItems() error {
 		}
 
 		for _, item := range data.Items {
-			_, err := db.Exec(`
-				INSERT INTO items (item_id, item_name)
-				VALUES ($1, $2)
-				ON CONFLICT (item_id) DO UPDATE SET item_name = EXCLUDED.item_name
-			`, item.ID, item.Name)
+			// Remove the "-" prefix if it exists
+			itemID := strings.TrimPrefix(item.ID, "-")
+
+			// Convert itemID to int
+			id, err := strconv.Atoi(itemID)
 			if err != nil {
-				log.Printf("Failed to insert item: %v", err)
+				log.Printf("Failed to convert item ID to integer: %v", err)
+				continue
 			}
+
+			uniqueItems[id] = item.Name
+		}
+	}
+
+	// Insert unique items into the database
+	for id, name := range uniqueItems {
+		_, err := db.Exec(`
+            INSERT INTO items (item_id, item_name)
+            VALUES ($1, $2)
+            ON CONFLICT (item_id) DO UPDATE SET item_name = EXCLUDED.item_name
+        `, id, name)
+		if err != nil {
+			log.Printf("Failed to insert item: %v", err)
 		}
 	}
 
