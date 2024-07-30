@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -635,6 +636,10 @@ func addUniqueItems() error {
 
 	// Insert or update items in the database
 	for id, name := range uniqueItems {
+		if id < 0 {
+			log.Printf("Warning: Negative item ID found after sanitization: %d. Skipping.", id)
+			continue
+		}
 		_, err := db.Exec(`
             INSERT INTO items (item_id, item_name)
             VALUES ($1, $2)
@@ -651,29 +656,36 @@ func addUniqueItems() error {
 }
 
 func sanitizeItemID(id interface{}) (int, error) {
-	var idStr string
+	var idInt int
+
 	switch v := id.(type) {
 	case int:
-		return v, nil
+		idInt = v
+	case int64:
+		idInt = int(v)
 	case float64:
-		return int(v), nil
+		idInt = int(v)
 	case string:
-		idStr = v
+		// Remove any non-digit characters, including "-"
+		idStr := strings.TrimLeft(v, "-")
+		idStr = regexp.MustCompile(`[^\d]+`).ReplaceAllString(idStr, "")
+		var err error
+		idInt, err = strconv.Atoi(idStr)
+		if err != nil {
+			return 0, fmt.Errorf("failed to convert item ID to integer: %v", err)
+		}
 	default:
 		return 0, fmt.Errorf("unexpected type for item ID: %T", id)
 	}
 
-	// Remove "-" prefix if present
-	idStr = strings.TrimPrefix(idStr, "-")
-
-	// Convert to integer
-	idInt, err := strconv.Atoi(idStr)
-	if err != nil {
-		return 0, fmt.Errorf("failed to convert item ID to integer: %v", err)
+	// Ensure the ID is positive
+	if idInt < 0 {
+		idInt = -idInt
 	}
 
 	return idInt, nil
 }
+
 func getItems(c *gin.Context) {
 	rows, err := db.Query("SELECT item_id, item_name FROM items")
 	if err != nil {
