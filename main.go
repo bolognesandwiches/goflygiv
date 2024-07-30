@@ -284,10 +284,18 @@ func recordTrade(c *gin.Context) {
 	tradeUID := uuid.New().String()
 
 	for _, item := range tradeItems {
-		_, err := db.Exec(`
+		// Sanitize item ID
+		itemIDStr := strings.TrimPrefix(strconv.Itoa(item.ItemID), "-")
+		itemID, err := strconv.Atoi(itemIDStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid item ID: %v", item.ItemID)})
+			return
+		}
+
+		_, err = db.Exec(`
             INSERT INTO trades (uid, date, trader, recipient, item_name, item_id, hc_value)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
-        `, tradeUID, item.Date, item.Trader, item.Recipient, item.ItemName, item.ItemID, item.HCValue)
+        `, tradeUID, item.Date, item.Trader, item.Recipient, item.ItemName, itemID, item.HCValue)
 
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -568,15 +576,23 @@ func addUniqueItems() error {
 	defer tradeRows.Close()
 
 	for tradeRows.Next() {
-		var id int
+		var idStr string
 		var name string
-		if err := tradeRows.Scan(&id, &name); err != nil {
+		if err := tradeRows.Scan(&idStr, &name); err != nil {
 			return fmt.Errorf("failed to scan trade row: %v", err)
+		}
+
+		// Sanitize item ID from trades
+		idStr = strings.TrimPrefix(idStr, "-")
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			log.Printf("Failed to convert item ID to integer: %v", err)
+			continue
 		}
 		uniqueItems[id] = name
 	}
 
-	// Handle scans
+	// Handle scans (this part remains the same)
 	scanRows, err := db.Query(`
         SELECT data
         FROM scans
@@ -634,7 +650,6 @@ func addUniqueItems() error {
 
 	return nil
 }
-
 func getItems(c *gin.Context) {
 	rows, err := db.Query("SELECT item_id, item_name FROM items")
 	if err != nil {
