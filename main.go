@@ -575,6 +575,7 @@ func addUniqueItems() error {
 	}
 	defer tradeRows.Close()
 
+	tradeCount := 0
 	for tradeRows.Next() {
 		var idStr string
 		var name string
@@ -590,9 +591,11 @@ func addUniqueItems() error {
 			continue
 		}
 		uniqueItems[id] = name
+		tradeCount++
 	}
+	log.Printf("Processed %d unique items from trades", tradeCount)
 
-	// Handle scans (this part remains the same)
+	// Handle scans
 	scanRows, err := db.Query(`
         SELECT data
         FROM scans
@@ -603,40 +606,65 @@ func addUniqueItems() error {
 	}
 	defer scanRows.Close()
 
+	scanCount := 0
 	for scanRows.Next() {
 		var scanData json.RawMessage
 		if err := scanRows.Scan(&scanData); err != nil {
 			return fmt.Errorf("failed to scan row: %v", err)
 		}
 
-		var data struct {
+		var items []struct {
+			ID   interface{} `json:"id"`
+			Name string      `json:"name"`
+		}
+
+		// Try to unmarshal as room scan
+		var roomScan struct {
 			Items []struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
+				ID   interface{} `json:"id"`
+				Name string      `json:"name"`
 			} `json:"items"`
 		}
-
-		if err := json.Unmarshal(scanData, &data); err != nil {
-			log.Printf("Failed to unmarshal scan data: %v", err)
-			continue
+		if err := json.Unmarshal(scanData, &roomScan); err == nil && len(roomScan.Items) > 0 {
+			items = roomScan.Items
+		} else {
+			// If not a room scan, try to unmarshal as inventory scan
+			if err := json.Unmarshal(scanData, &items); err != nil {
+				log.Printf("Failed to unmarshal scan data: %v", err)
+				continue
+			}
 		}
 
-		for _, item := range data.Items {
-			// Remove the "-" prefix if it exists
-			itemID := strings.TrimPrefix(item.ID, "-")
+		for _, item := range items {
+			var idStr string
+			switch v := item.ID.(type) {
+			case float64:
+				idStr = strconv.FormatFloat(v, 'f', 0, 64)
+			case string:
+				idStr = v
+			default:
+				log.Printf("Unexpected type for item ID: %T", v)
+				continue
+			}
 
-			// Convert itemID to int
-			id, err := strconv.Atoi(itemID)
+			// Remove the "-" prefix if it exists
+			idStr = strings.TrimPrefix(idStr, "-")
+
+			// Convert idStr to int
+			id, err := strconv.Atoi(idStr)
 			if err != nil {
 				log.Printf("Failed to convert item ID to integer: %v", err)
 				continue
 			}
 
 			uniqueItems[id] = item.Name
+			scanCount++
 		}
 	}
+	log.Printf("Processed %d unique items from scans", scanCount)
 
 	// Insert unique items into the database
+	insertedCount := 0
 	for id, name := range uniqueItems {
 		_, err := db.Exec(`
             INSERT INTO items (item_id, item_name)
@@ -645,8 +673,11 @@ func addUniqueItems() error {
         `, id, name)
 		if err != nil {
 			log.Printf("Failed to insert item: %v", err)
+		} else {
+			insertedCount++
 		}
 	}
+	log.Printf("Inserted or updated %d items in the database", insertedCount)
 
 	return nil
 }
