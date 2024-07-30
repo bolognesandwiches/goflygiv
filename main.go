@@ -179,9 +179,8 @@ func initDB() error {
 
 	_, err = db.Exec(`
         CREATE TABLE IF NOT EXISTS items (
-            id SERIAL PRIMARY KEY,
-            item_id INTEGER UNIQUE,
-            item_name TEXT
+            item_id INTEGER PRIMARY KEY,
+            item_name TEXT NOT NULL
         )
     `)
 	if err != nil {
@@ -575,38 +574,22 @@ func addUniqueItems() error {
 	}
 	defer tradeRows.Close()
 
-	tradeCount := 0
 	for tradeRows.Next() {
-		var idStr string
+		var id int
 		var name string
-		if err := tradeRows.Scan(&idStr, &name); err != nil {
+		if err := tradeRows.Scan(&id, &name); err != nil {
 			return fmt.Errorf("failed to scan trade row: %v", err)
 		}
-
-		// Sanitize item ID from trades
-		idStr = strings.TrimPrefix(idStr, "-")
-		id, err := strconv.Atoi(idStr)
-		if err != nil {
-			log.Printf("Failed to convert item ID to integer: %v", err)
-			continue
-		}
 		uniqueItems[id] = name
-		tradeCount++
 	}
-	log.Printf("Processed %d unique items from trades", tradeCount)
 
 	// Handle scans
-	scanRows, err := db.Query(`
-        SELECT data
-        FROM scans
-        WHERE scan_type IN ('room', 'inventory')
-    `)
+	scanRows, err := db.Query("SELECT data FROM scans WHERE scan_type IN ('room', 'inventory')")
 	if err != nil {
 		return fmt.Errorf("failed to query scans: %v", err)
 	}
 	defer scanRows.Close()
 
-	scanCount := 0
 	for scanRows.Next() {
 		var scanData json.RawMessage
 		if err := scanRows.Scan(&scanData); err != nil {
@@ -614,15 +597,15 @@ func addUniqueItems() error {
 		}
 
 		var items []struct {
-			ID   interface{} `json:"id"`
-			Name string      `json:"name"`
+			ID   int    `json:"id"`
+			Name string `json:"name"`
 		}
 
 		// Try to unmarshal as room scan
 		var roomScan struct {
 			Items []struct {
-				ID   interface{} `json:"id"`
-				Name string      `json:"name"`
+				ID   int    `json:"id"`
+				Name string `json:"name"`
 			} `json:"items"`
 		}
 		if err := json.Unmarshal(scanData, &roomScan); err == nil && len(roomScan.Items) > 0 {
@@ -636,35 +619,11 @@ func addUniqueItems() error {
 		}
 
 		for _, item := range items {
-			var idStr string
-			switch v := item.ID.(type) {
-			case float64:
-				idStr = strconv.FormatFloat(v, 'f', 0, 64)
-			case string:
-				idStr = v
-			default:
-				log.Printf("Unexpected type for item ID: %T", v)
-				continue
-			}
-
-			// Remove the "-" prefix if it exists
-			idStr = strings.TrimPrefix(idStr, "-")
-
-			// Convert idStr to int
-			id, err := strconv.Atoi(idStr)
-			if err != nil {
-				log.Printf("Failed to convert item ID to integer: %v", err)
-				continue
-			}
-
-			uniqueItems[id] = item.Name
-			scanCount++
+			uniqueItems[item.ID] = item.Name
 		}
 	}
-	log.Printf("Processed %d unique items from scans", scanCount)
 
-	// Insert unique items into the database
-	insertedCount := 0
+	// Insert or update items in the database
 	for id, name := range uniqueItems {
 		_, err := db.Exec(`
             INSERT INTO items (item_id, item_name)
@@ -672,12 +631,11 @@ func addUniqueItems() error {
             ON CONFLICT (item_id) DO UPDATE SET item_name = EXCLUDED.item_name
         `, id, name)
 		if err != nil {
-			log.Printf("Failed to insert item: %v", err)
-		} else {
-			insertedCount++
+			log.Printf("Failed to insert/update item %d (%s): %v", id, name, err)
 		}
 	}
-	log.Printf("Inserted or updated %d items in the database", insertedCount)
+
+	log.Printf("Processed and updated %d unique items", len(uniqueItems))
 
 	return nil
 }
