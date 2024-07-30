@@ -575,10 +575,15 @@ func addUniqueItems() error {
 	defer tradeRows.Close()
 
 	for tradeRows.Next() {
-		var id int
+		var idStr string
 		var name string
-		if err := tradeRows.Scan(&id, &name); err != nil {
+		if err := tradeRows.Scan(&idStr, &name); err != nil {
 			return fmt.Errorf("failed to scan trade row: %v", err)
+		}
+		id, err := sanitizeItemID(idStr)
+		if err != nil {
+			log.Printf("Failed to sanitize item ID from trade: %v", err)
+			continue
 		}
 		uniqueItems[id] = name
 	}
@@ -597,15 +602,15 @@ func addUniqueItems() error {
 		}
 
 		var items []struct {
-			ID   int    `json:"id"`
-			Name string `json:"name"`
+			ID   interface{} `json:"id"`
+			Name string      `json:"name"`
 		}
 
 		// Try to unmarshal as room scan
 		var roomScan struct {
 			Items []struct {
-				ID   int    `json:"id"`
-				Name string `json:"name"`
+				ID   interface{} `json:"id"`
+				Name string      `json:"name"`
 			} `json:"items"`
 		}
 		if err := json.Unmarshal(scanData, &roomScan); err == nil && len(roomScan.Items) > 0 {
@@ -619,7 +624,12 @@ func addUniqueItems() error {
 		}
 
 		for _, item := range items {
-			uniqueItems[item.ID] = item.Name
+			id, err := sanitizeItemID(item.ID)
+			if err != nil {
+				log.Printf("Failed to sanitize item ID from scan: %v", err)
+				continue
+			}
+			uniqueItems[id] = item.Name
 		}
 	}
 
@@ -638,6 +648,31 @@ func addUniqueItems() error {
 	log.Printf("Processed and updated %d unique items", len(uniqueItems))
 
 	return nil
+}
+
+func sanitizeItemID(id interface{}) (int, error) {
+	var idStr string
+	switch v := id.(type) {
+	case int:
+		return v, nil
+	case float64:
+		return int(v), nil
+	case string:
+		idStr = v
+	default:
+		return 0, fmt.Errorf("unexpected type for item ID: %T", id)
+	}
+
+	// Remove "-" prefix if present
+	idStr = strings.TrimPrefix(idStr, "-")
+
+	// Convert to integer
+	idInt, err := strconv.Atoi(idStr)
+	if err != nil {
+		return 0, fmt.Errorf("failed to convert item ID to integer: %v", err)
+	}
+
+	return idInt, nil
 }
 func getItems(c *gin.Context) {
 	rows, err := db.Query("SELECT item_id, item_name FROM items")
