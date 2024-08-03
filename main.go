@@ -105,7 +105,7 @@ func main() {
 	r.POST("/deletion-request", authenticateAPIKey(handleDeletionRequest))
 	r.POST("/export", authenticateAPIKey(handleExport))
 	r.POST("/manual-export", authenticateAPIKey(handleManualExport))
-	r.GET("/items", getItems)
+	r.GET("/items", authenticateAPIKey(getItems))
 
 	port := os.Getenv("PORT")
 	if port == "" {
