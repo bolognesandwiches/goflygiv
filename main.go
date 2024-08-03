@@ -42,8 +42,12 @@ type TradeItem struct {
 }
 
 type Item struct {
-	ID   int    `json:"id"`
-	Name string `json:"name"`
+	ID            int       `json:"id"`
+	Name          string    `json:"name"`
+	FirstScanDate time.Time `json:"first_scan_date"`
+	LastScanDate  time.Time `json:"last_scan_date"`
+	Owner         string    `json:"owner"`
+	ItemType      string    `json:"item_type"`
 }
 
 var db *sql.DB
@@ -181,7 +185,11 @@ func initDB() error {
 	_, err = db.Exec(`
         CREATE TABLE IF NOT EXISTS items (
             item_id INTEGER PRIMARY KEY,
-            item_name TEXT NOT NULL
+            item_name TEXT NOT NULL,
+            first_scan_date TIMESTAMP,
+            last_scan_date TIMESTAMP,
+            owner TEXT,
+            item_type TEXT DEFAULT 'Normal'
         )
     `)
 	if err != nil {
@@ -456,10 +464,10 @@ func generateExportFile() (string, error) {
 	}
 
 	rows, err := db.Query(`
-		SELECT uid, date, trader, recipient, item_name, item_id, hc_value 
-		FROM trades 
-		WHERE date >= NOW() - INTERVAL '1 hour' AND date < NOW()
-	`)
+			SELECT uid, date, trader, recipient, item_name, item_id, hc_value 
+			FROM trades 
+			WHERE date >= NOW() - INTERVAL '1 hour' AND date < NOW()
+		`)
 	if err != nil {
 		return "", fmt.Errorf("failed to query trades: %v", err)
 	}
@@ -566,10 +574,14 @@ func executeExport() error {
 }
 
 func addUniqueItems() error {
-	uniqueItems := make(map[int]string)
+	uniqueItems := make(map[int]struct {
+		Name     string
+		Owner    string
+		ScanDate time.Time
+	})
 
 	// Handle trades
-	tradeRows, err := db.Query("SELECT DISTINCT item_id, item_name FROM trades")
+	tradeRows, err := db.Query("SELECT DISTINCT item_id, item_name, recipient, date FROM trades")
 	if err != nil {
 		return fmt.Errorf("failed to query trades: %v", err)
 	}
@@ -577,8 +589,9 @@ func addUniqueItems() error {
 
 	for tradeRows.Next() {
 		var idStr string
-		var name string
-		if err := tradeRows.Scan(&idStr, &name); err != nil {
+		var name, recipient string
+		var date time.Time
+		if err := tradeRows.Scan(&idStr, &name, &recipient, &date); err != nil {
 			return fmt.Errorf("failed to scan trade row: %v", err)
 		}
 		id, err := sanitizeItemID(idStr)
@@ -586,11 +599,18 @@ func addUniqueItems() error {
 			log.Printf("Failed to sanitize item ID from trade: %v", err)
 			continue
 		}
-		uniqueItems[id] = name
+		item, exists := uniqueItems[id]
+		if !exists || date.After(item.ScanDate) {
+			uniqueItems[id] = struct {
+				Name     string
+				Owner    string
+				ScanDate time.Time
+			}{name, recipient, date}
+		}
 	}
 
 	// Handle scans
-	scanRows, err := db.Query("SELECT data FROM scans WHERE scan_type IN ('room', 'inventory')")
+	scanRows, err := db.Query("SELECT data, user_id, timestamp FROM scans WHERE scan_type IN ('room', 'inventory')")
 	if err != nil {
 		return fmt.Errorf("failed to query scans: %v", err)
 	}
@@ -598,7 +618,9 @@ func addUniqueItems() error {
 
 	for scanRows.Next() {
 		var scanData json.RawMessage
-		if err := scanRows.Scan(&scanData); err != nil {
+		var userID string
+		var timestamp time.Time
+		if err := scanRows.Scan(&scanData, &userID, &timestamp); err != nil {
 			return fmt.Errorf("failed to scan row: %v", err)
 		}
 
@@ -607,7 +629,7 @@ func addUniqueItems() error {
 			Name string      `json:"name"`
 		}
 
-		// Try to unmarshal as room scan
+		// Try to unmarshal as room scan or inventory scan
 		var roomScan struct {
 			Items []struct {
 				ID   interface{} `json:"id"`
@@ -617,7 +639,6 @@ func addUniqueItems() error {
 		if err := json.Unmarshal(scanData, &roomScan); err == nil && len(roomScan.Items) > 0 {
 			items = roomScan.Items
 		} else {
-			// If not a room scan, try to unmarshal as inventory scan
 			if err := json.Unmarshal(scanData, &items); err != nil {
 				log.Printf("Failed to unmarshal scan data: %v", err)
 				continue
@@ -630,23 +651,33 @@ func addUniqueItems() error {
 				log.Printf("Failed to sanitize item ID from scan: %v", err)
 				continue
 			}
-			uniqueItems[id] = item.Name
+			existingItem, exists := uniqueItems[id]
+			if !exists || timestamp.After(existingItem.ScanDate) {
+				uniqueItems[id] = struct {
+					Name     string
+					Owner    string
+					ScanDate time.Time
+				}{item.Name, userID, timestamp}
+			}
 		}
 	}
 
 	// Insert or update items in the database
-	for id, name := range uniqueItems {
+	for id, item := range uniqueItems {
 		if id < 0 {
 			log.Printf("Warning: Negative item ID found after sanitization: %d. Skipping.", id)
 			continue
 		}
 		_, err := db.Exec(`
-            INSERT INTO items (item_id, item_name)
-            VALUES ($1, $2)
-            ON CONFLICT (item_id) DO UPDATE SET item_name = EXCLUDED.item_name
-        `, id, name)
+				INSERT INTO items (item_id, item_name, first_scan_date, last_scan_date, owner)
+				VALUES ($1, $2, $3, $3, $4)
+				ON CONFLICT (item_id) DO UPDATE SET 
+					item_name = EXCLUDED.item_name,
+					last_scan_date = GREATEST(items.last_scan_date, EXCLUDED.last_scan_date),
+					owner = EXCLUDED.owner
+			`, id, item.Name, item.ScanDate, item.Owner)
 		if err != nil {
-			log.Printf("Failed to insert/update item %d (%s): %v", id, name, err)
+			log.Printf("Failed to insert/update item %d (%s): %v", id, item.Name, err)
 		}
 	}
 
@@ -687,7 +718,7 @@ func sanitizeItemID(id interface{}) (int, error) {
 }
 
 func getItems(c *gin.Context) {
-	rows, err := db.Query("SELECT item_id, item_name FROM items")
+	rows, err := db.Query("SELECT item_id, item_name, first_scan_date, last_scan_date, owner, item_type FROM items")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch items"})
 		return
@@ -697,7 +728,7 @@ func getItems(c *gin.Context) {
 	var items []Item
 	for rows.Next() {
 		var item Item
-		if err := rows.Scan(&item.ID, &item.Name); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.FirstScanDate, &item.LastScanDate, &item.Owner, &item.ItemType); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan item"})
 			return
 		}
