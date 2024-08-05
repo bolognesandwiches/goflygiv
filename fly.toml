@@ -24,3 +24,7 @@ primary_region = 'lhr'
   cpu_kind = 'shared'
   cpus = 1
 s_running = 0
+
+[[mounts]]
+  source = "pgdata"
+  destination = "/var/lib/postgresql/data"
