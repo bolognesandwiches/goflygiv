@@ -3,7 +3,7 @@ primary_region = "lhr"
 
 [build]
   builder = "paketobuildpacks/builder:base"
-
+  
 [env]
   PORT = "8080"
 
@@ -18,7 +18,4 @@ primary_region = "lhr"
   memory = "1gb"
   cpu_kind = "shared"
   cpus = 1
-
-[[mounts]]
-  source = "pgdata"
-  destination = "/var/lib/postgresql/data"
+  ephemeral_disk_size_mb = 5120
