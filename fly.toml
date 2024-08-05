@@ -21,6 +21,6 @@ primary_region = "lhr"
 
 
 [mounts]
-  source = "postgres_data"
+  source = pgdata"
   destination = "/var/lib/postgresql/data"
 
