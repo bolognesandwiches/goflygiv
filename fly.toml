@@ -20,7 +20,3 @@ primary_region = "lhr"
   cpus = 1
 
 
-[mounts]
-  source = "pgdata"
-  destination = "/var/lib/postgresql/data"
-
