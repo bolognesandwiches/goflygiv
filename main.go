@@ -84,7 +84,7 @@ func main() {
 	parsedURL.RawQuery = query.Encode()
 
 	var dbErr error
-	db, dbErr = sql.Open("gitemviewer", parsedURL.String())
+	db, dbErr = sql.Open("postgres", parsedURL.String())
 	if dbErr != nil {
 		log.Fatalf("Error opening database: %v", dbErr)
 	}
