@@ -1,0 +1,11 @@
+{
+    "config": {
+      "mounts": [
+        {
+          "volume": "vol_v30dmxx91ok5j8xv",
+          "path": "/data"
+        }
+      ]
+    }
+  }
+  
