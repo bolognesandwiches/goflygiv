@@ -1,11 +1,23 @@
 {
     "config": {
+      "image": "gitemviewer:deployment-01J4JH2JHVTPSH874E7MXAJ0KH",
+      "services": [
+        {
+          "protocol": "tcp",
+          "internal_port": 5433, 
+          "autostart": true,
+          "autostop": true
+        }
+      ],
       "mounts": [
         {
           "volume": "vol_v30dmxx91ok5j8xv",
-          "path": "/data"
+          "path": "/data" 
         }
-      ]
+      ],
+      "env": {
+        "DATABASE_URL": "postgres://postgres:Rosebud20118413!@137.66.58.51:5433/postgres"
+      }
     }
   }
   
